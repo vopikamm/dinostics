@@ -640,9 +640,11 @@ class Diagnostics:
         """
         Compute potential vorticity on F-points. Free slip boundary condition.
         """
+        #e3f = domain.e3f_0
+        e3f = grid.interp(grid.interp(mask.e3t, 'Y'), 'X') / grid.interp(grid.interp(mask.tmask, 'Y'), 'X') 
         q = ( 
             grid.diff(domain.e2v * v, 'X') - grid.diff(domain.e1u * u, 'Y') 
-             ) * mask.fmask / domain.e1f / domain.e2f
+             ) * mask.fmask / domain.e1f / domain.e2f / e3f
         return(q)
     
     @staticmethod
@@ -712,15 +714,17 @@ class Diagnostics:
             Q_U_ne * V_U_ne + 
             Q_U_nw * V_U_nw + 
             Q_U_sw * V_U_sw + 
-            Q_U_se * V_U_se
-        ) / domain.e1u - grid.diff(KE, 'X')
+            Q_U_se * V_U_se - 
+            grid.diff(KE, 'X')
+            ) / domain.e1u 
         # compute advection on U-point
         adv_v = - mask.vmask * (
             Q_V_ne * U_V_ne + 
             Q_V_nw * U_V_nw + 
             Q_V_sw * U_V_sw + 
-            Q_V_se * U_V_se
-        ) / domain.e2v - grid.diff(KE, 'Y')
+            Q_V_se * U_V_se -
+            grid.diff(KE, 'Y')
+            ) / domain.e2v
         #reorder dimensions to t,z,y,x
         if 't' in adv_u.dims:
             if 'z_c' in adv_u.dims:
