@@ -640,8 +640,8 @@ class Diagnostics:
         """
         Compute potential vorticity on F-points. Free slip boundary condition.
         """
-        #e3f = domain.e3f_0
-        e3f = grid.interp(grid.interp(mask.e3t, 'Y'), 'X') / grid.interp(grid.interp(mask.tmask, 'Y'), 'X') 
+        e3f = domain.e3f_0 #--> TODO: not exactly nemo, depending on how e3f_0 depends on nn_e3f_typ
+        #e3f = grid.interp(grid.interp(mask.e3t_0, 'Y'), 'X') / grid.interp(grid.interp(mask.tmask, 'Y'), 'X') 
         q = ( 
             grid.diff(domain.e2v * v, 'X') - grid.diff(domain.e1u * u, 'Y') 
              ) * mask.fmask / domain.e1f / domain.e2f / e3f

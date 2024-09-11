@@ -289,9 +289,14 @@ class GridManipulation:
         # Hardcoded values for coarsening from 1/16 --> 1/4 degree,
         # since horizontal dimension-size depends on mercator projection    
         #TODO Could compute from resolution analyticaly and compute needed domain-size
-        var_inner   = var.isel(x_c=slice(1,-1), y_c=slice(1,-2))
-        area_inner  = (domain.e1t * domain.e2t).isel(x_c=slice(1,-1), y_c=slice(1,-2))
-        mask_inner  = mask.tmask.isel(x_c=slice(1,-1), y_c=slice(1,-2))
+        # 1/4° --> 1°
+        # var_inner   = var.isel(x_c=slice(1,-1), y_c=slice(1,-2))
+        # area_inner  = (domain.e1t * domain.e2t).isel(x_c=slice(1,-1), y_c=slice(1,-2))
+        # mask_inner  = mask.tmask.isel(x_c=slice(1,-1), y_c=slice(1,-2))
+        #1/4° --> 1°
+        var_inner   = var.isel(x_c=slice(1,-1), y_c=slice(0,-1))
+        area_inner  = (domain.e1t * domain.e2t).isel(x_c=slice(0,-1), y_c=slice(0,-1))
+        mask_inner  = mask.tmask.isel(x_c=slice(1,-1), y_c=slice(0,-1))
 
         # coarse-graining
         coarsen = lambda x: x.coarsen({'x_c':factor, 'y_c':factor}).sum()

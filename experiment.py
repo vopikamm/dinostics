@@ -47,26 +47,26 @@ class NemoExperiment:
         else:
             return(restarts)
     
-    def open_domain(self):
+    def open_domain(self, chunks='auto'):
         """ Open the domain_cfg, not lazy."""
         try:
             domain = xn.open_domain_cfg(
                 files=[self.path + self.restarts[0] + '/domain_cfg.nc']
-            ).chunk('auto')
+            ).chunk(chunks)
         except:
             domain = xn.open_domain_cfg(
                 files=[self.path + self.restarts[0] + '/domain_cfg_out.nc']
-            ).chunk('auto')
+            ).chunk(chunks)
         for var in list(domain.keys()):
             if (domain[var].dtype == 'float64'):
                 domain[var] = domain[var].astype('float32')
         return(domain)
 
-    def open_mask(self):
+    def open_mask(self, chunks='auto'):
         """ Open the mesh_mask, lazy."""
         mask = xn.open_domain_cfg(
             files=[self.path + self.restarts[0] + '/mesh_mask.nc']
-        ).chunk('auto')
+        ).chunk(chunks)
         for var in list(mask.keys()):
             if (mask[var].dtype == 'float64'):
                 mask[var] = mask[var].astype('float32')
