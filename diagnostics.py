@@ -691,8 +691,8 @@ class Diagnostics:
         Q_U_se = Q_sw.roll(x_c=-1).swap_dims({'x_c':'x_f'})
         # shift v-velocities for advection on U-points
         # now orientation (ne, nw, sw, se) is w.r.t. the U-point
-        V_U_ne = (v * domain.e1v * domain.e2v).roll(x_c=-1).swap_dims({'x_c':'x_f', 'y_f':'y_c'})
-        V_U_nw = (v * domain.e1v * domain.e2v).swap_dims({'x_c':'x_f', 'y_f':'y_c'})
+        V_U_ne = (v * domain.e1v * domain.e3v_0).roll(x_c=-1).swap_dims({'x_c':'x_f', 'y_f':'y_c'})
+        V_U_nw = (v * domain.e1v * domain.e3v_0).swap_dims({'x_c':'x_f', 'y_f':'y_c'})
         V_U_sw = V_U_nw.shift(y_c=1, fill_value=0.)
         V_U_se = V_U_ne.shift(y_c=1, fill_value=0.)
         # shift triads for advection on V-points
@@ -703,8 +703,8 @@ class Diagnostics:
         Q_V_se = Q_ne.swap_dims({'y_c':'y_f'})
         # shift u-velocities for advection on V-points
         # now orientation (ne, nw, sw, se) is w.r.t. the V-point
-        U_V_se = (u * domain.e1u * domain.e2u).swap_dims({'x_f':'x_c', 'y_c':'y_f'})
-        U_V_sw = (u * domain.e1u * domain.e2u).roll(x_f=1).swap_dims({'x_f':'x_c', 'y_c':'y_f'})
+        U_V_se = (u * domain.e3u_0 * domain.e2u).swap_dims({'x_f':'x_c', 'y_c':'y_f'})
+        U_V_sw = (u * domain.e3u_0 * domain.e2u).roll(x_f=1).swap_dims({'x_f':'x_c', 'y_c':'y_f'})
         U_V_nw = U_V_sw.shift(y_f=-1, fill_value=0.)
         U_V_ne = U_V_se.shift(y_f=-1, fill_value=0.)
         # compute kinetic energy on T-point
