@@ -289,14 +289,14 @@ class GridManipulation:
         # Hardcoded values for coarsening from 1/16 --> 1/4 degree,
         # since horizontal dimension-size depends on mercator projection    
         #TODO Could compute from resolution analyticaly and compute needed domain-size
-        # 1/4° --> 1°
-        # var_inner   = var.isel(x_c=slice(1,-1), y_c=slice(1,-2))
-        # area_inner  = (domain.e1t * domain.e2t).isel(x_c=slice(1,-1), y_c=slice(1,-2))
-        # mask_inner  = mask.tmask.isel(x_c=slice(1,-1), y_c=slice(1,-2))
+        # 1/16° --> 1/4°
+        var_inner   = var.isel(x_c=slice(1,-1), y_c=slice(1,-2))
+        area_inner  = (domain.e1t * domain.e2t).isel(x_c=slice(1,-1), y_c=slice(1,-2))
+        mask_inner  = mask.tmask.isel(x_c=slice(1,-1), y_c=slice(1,-2))
         #1/4° --> 1°
-        var_inner   = var.isel(x_c=slice(1,-1), y_c=slice(0,-1))
-        area_inner  = (domain.e1t * domain.e2t).isel(x_c=slice(0,-1), y_c=slice(0,-1))
-        mask_inner  = mask.tmask.isel(x_c=slice(1,-1), y_c=slice(0,-1))
+        # var_inner   = var.isel(x_c=slice(1,-1), y_c=slice(4,-5))
+        # area_inner  = (domain.e1t * domain.e2t).isel(x_c=slice(1,-1), y_c=slice(4,-5))
+        # mask_inner  = mask.tmask.isel(x_c=slice(1,-1), y_c=slice(4,-5))
 
         # coarse-graining
         coarsen = lambda x: x.coarsen({'x_c':factor, 'y_c':factor}).sum()
@@ -311,6 +311,89 @@ class GridManipulation:
             return(var_coarse.where(mask_coarse==1.0))
         else:
             return(var_coarse.where(mask_coarse.isel(z_c=0)==1.0))
+
+    def map_on_cartesian_grid(self, var_u, var_v, lon_boundaries, lat_boundaries):
+        '''
+        Map horizontal velocities (or tendencies) on the same cartesian grid.
+        Necessary for isotropic (cross) spectra
+
+        var_u: variable on U-point
+        var_v: variable on V-point
+        
+        lon_boundaries: list[eastern boundary, western boundary]
+        lat_boundaries: list[southern boundary, northern boundary]
+        --> define the cartesian box in lat/lon space
+
+        return: (var_u_cartesian, var_v_cartesian): tuple of regridded variables
+        '''
+        r_earth_nemo = 6371229.0 #TODO this should come from config class
+        res = self.experiment.namelist['namusr_def']['rn_e1_deg']
+        # midpoints in lat/lon space
+        midpoint_lat = (lat_boundaries[0] + lat_boundaries[1]) / 2
+        midpoint_lon = (lon_boundaries[0] + lon_boundaries[1]) / 2
+        # width in lat/lon space
+        width_lat = (lat_boundaries[1] - lat_boundaries[0])
+        width_lon = (lon_boundaries[1] - lon_boundaries[0])
+        # center latitude/longitude around midpoints
+        dlat_u = self.experiment.domain.gphiu - midpoint_lat
+        dlon_u = self.experiment.domain.glamu - midpoint_lon
+        
+        dlat_v = self.experiment.domain.gphiv - midpoint_lat
+        dlon_v = self.experiment.domain.glamv - midpoint_lon
+
+        # To cartesian space
+        y_u = r_earth_nemo * np.pi * dlat_u / 180
+        x_u = r_earth_nemo * np.cos(self.experiment.domain.gphiu * np.pi / 180) * np.pi * dlon_u / 180
+
+        y_v = r_earth_nemo * np.pi * dlat_v / 180
+        x_v = r_earth_nemo * np.cos(self.experiment.domain.gphiv * np.pi / 180) * np.pi * dlon_v / 180
+
+        # add cartesian coordinate to variables and change dimension names
+        var_u = var_u.assign_coords({'y_u':y_u, 'x_u':x_u}).rename({'y_c':'y', 'x_f':'x', 'glamu':'lon', 'gphiu':'lat'})
+        var_v = var_v.assign_coords({'y_v':y_v, 'x_v':x_v}).rename({'y_f':'y', 'x_c':'x', 'glamv':'lon', 'gphiv':'lat'})
+
+        # boundaries in that cartesian space (minimum extent for longitude boundaries at maximum latitude)
+        y_boundaries = r_earth_nemo * np.pi * (-width_lat / 2) / 180, r_earth_nemo * np.pi * (width_lat / 2) / 180
+        x_boundaries = - r_earth_nemo * np.cos(max([abs(x) for x in lat_boundaries]) * np.pi / 180) * np.pi * (width_lon / 2) / 180, r_earth_nemo * np.cos(max([abs(x) for x in lat_boundaries]) * np.pi / 180) * np.pi * (width_lon / 2) / 180
+
+        # isotropic gridspacing in cartesian coordinates at the midpoint
+        dxy = r_earth_nemo * np.cos(midpoint_lat * np.pi / 180) * np.pi * res / 180
+
+        # number of gridpoints in x-/y-direction
+        n_x = len(np.arange(x_boundaries[0], x_boundaries[1], dxy))
+        n_y = len(np.arange(y_boundaries[0], y_boundaries[1], dxy))
+
+        # x-, y-coordinate and X-, Y-mesh 
+        x, y = (np.linspace(x_boundaries[0], x_boundaries[1], n_x), np.linspace(y_boundaries[0], y_boundaries[1], n_y))
+        X, Y = np.meshgrid(x, y)
+
+        # xarray dataset
+        ds_region = xr.DataArray(
+            data=np.ones_like(X),
+            dims=['y', 'x'],
+            coords={
+                'lon':(['y', 'x'], X),
+                'lat':(['y', 'x'], Y)
+            }
+        )
+
+        ds_region['lat'] = (ds_region['lat'] * 180 / np.pi / r_earth_nemo) + midpoint_lat
+        ds_region['lon'] = (ds_region['lon'] * 180 / np.pi / r_earth_nemo) / np.cos(ds_region.lat * np.pi / 180) + midpoint_lon
+
+        # Regrid var_u, and var_v on new grid
+        Regridder_u = Regridder(var_u, ds_region, 'bilinear')
+        Regridder_v = Regridder(var_v, ds_region, 'bilinear')
+
+        var_u_cartesian = Regridder_u(var_u)
+        var_v_cartesian = Regridder_v(var_v)
+
+        var_u_cartesian = var_u_cartesian.assign_coords({'x':x, 'y':y})
+        var_v_cartesian = var_v_cartesian.assign_coords({'x':x, 'y':y})
+        return(var_u_cartesian, var_v_cartesian)
+
+
+
+        
         
         
     # def coarsen(self, factor=10, factor,

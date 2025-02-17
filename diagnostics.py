@@ -4,6 +4,7 @@ import xgcm         as xg
 import numpy        as np
 import scipy.sparse as sparse
 import scipy.sparse.linalg as la
+import xrft
 
 class Diagnostics:
     """ Diagnostics helper class collecting all diagnostic methods for DINO Experiment class. """
@@ -123,7 +124,7 @@ class Diagnostics:
             print("T_2D data not available.")
             return(None)
 
-    def get_emp(self, d=20, tolerance=1e-20):
+    def get_emp(self, data=None, d=20, tolerance=1e-20):
         """
         Compute the EmP-field (Evaporation - Precipitation).
         To ensure a conserved volume the global mean EmP should be zero.
@@ -136,7 +137,9 @@ class Diagnostics:
     
         with        A   = emp_mean * L / (2 * d)
         """
-        data        = self.experiment.data['T_2D']
+        if data is not None:
+            data        = self.experiment.data['T_2D']
+        
         if data is not None:
 
             mask        = self.experiment.mask
@@ -154,7 +157,8 @@ class Diagnostics:
             )
             taper_mean  = grid.average(taper, ['X', 'Y'])
 
-            while abs(emp_mean).max().values > tolerance:  
+            while abs(emp_mean).max().values > tolerance:
+                print(abs(emp_mean).max().values)
                 emp_star    = emp  - emp_mean  * taper / taper_mean
                 emp         = emp_star
                 emp_mean    = grid.average(emp_star, ['X', 'Y'])
@@ -233,23 +237,30 @@ class Diagnostics:
         return(rho)
         
         
-    def get_N_squared(self):
+    def get_N_squared(self, toce=None, soce=None):
         """
         Compute the squared Brunt-Väisälä frequency according to the EOS. 
         Only for S-EOS currently.
         """
-        data_T = self.experiment.data['T_3D']
-        data_W = self.experiment.data['W_3D']
-        
-        if data_T is not None and data_W is not None:
+        if toce is not None and soce is not None:
             nml    = self.experiment.namelist['nameos']
             mask   = self.experiment.mask
             domain = self.experiment.domain
-            grid   = self.experiment.grid
+            metrics = {
+                ('X',): ['e1t', 'e1u', 'e1v', 'e1f'], # X distances
+                ('Y',): ['e2t', 'e2u', 'e2v', 'e2f'], # Y distances
+                ('Z',): ['e3t_0', 'e3u_0', 'e3v_0', 'e3f_0', 'e3w_0'], # Z distances
+            }
+            grid = xg.Grid(domain, metrics=metrics, periodic=False)
+
+            # for now no time-dependency...
+            e3w = mask.e3w_0
+
             # masking of T,S
-            soce = data_T.soce.where(mask.tmask == 1.)
-            toce = data_T.toce.where(mask.tmask == 1.)
-            z    = domain.gdept_0.where(mask.tmask == 1.)
+            soce = soce.where(mask.tmask == 1.)
+            toce = toce.where(mask.tmask == 1.)
+            z    = mask.gdept_0.where(mask.tmask == 1.)
+
             if nml['ln_seos']:
                 alpha   = ( nml['rn_a0'] * (1. + nml['rn_lambda1'] * ( toce - 10.) + nml['rn_mu1'] * z) + nml['rn_nu'] * soce ) / 1026.  
                 beta    = ( nml['rn_b0'] * (1. - nml['rn_lambda2'] * ( soce - 35.) - nml['rn_mu2'] * z) + nml['rn_nu'] * toce ) / 1026.
@@ -258,13 +269,13 @@ class Diagnostics:
                     * grid.diff(toce, 'Z', boundary='extend')              # dT/dz
                     + grid.interp(beta, 'Z', boundary='extend')            # beta on W
                     * grid.diff(soce, 'Z', boundary='extend')              # dS/dz
-                ) / data_W.e3w
+                ) / e3w
                 Nsq = Nsq.where(Nsq >= 1e-8).fillna(1e-7)
                 return(Nsq)
             else:
                 raise Exception('Only S-EOS has been implemented yet.')
         else:
-            print("T_3D or W_3D data not available.")
+            print("salinity or temperature dataarray not given.")
             return(None)
         
     
@@ -358,6 +369,32 @@ class Diagnostics:
         return(OHT)
     
     @staticmethod
+    def get_eke_isotropic(u, v):
+        uhat2 = xrft.power_spectrum(u, dim=['x','y'], scaling="density", window='hann', detrend='linear').compute()
+        vhat2 = xrft.power_spectrum(v, dim=['x','y'], scaling="density", window='hann', detrend='linear').compute()
+        
+        ekehat = .5*(uhat2 + vhat2)
+        
+        eke_iso = xrft.isotropize(ekehat, ['freq_x', 'freq_y'], nfactor=2, truncate=True, complx=True)
+        
+        eke_iso['wavenumber'] = (eke_iso.freq_r*2*np.pi)
+        eke_iso['wavenumber_km'] = 1e3 * (eke_iso.freq_r*2*np.pi)
+        return(eke_iso.real)
+    
+    @staticmethod
+    def get_ke_transfer_isotropic(u, f_u, v, f_v):
+        u_f_u = xrft.cross_spectrum(u, f_u, dim=['x','y'], scaling="density", window='hann', detrend='linear').compute()
+        v_f_v = xrft.cross_spectrum(v, f_v, dim=['x','y'], scaling="density", window='hann', detrend='linear').compute()
+        
+        ke_transfer = (u_f_u + v_f_v)
+        
+        ke_transfer_iso = xrft.isotropize(ke_transfer, ['freq_x', 'freq_y'], nfactor=2, truncate=True, complx=True)
+        
+        ke_transfer_iso['wavenumber'] = (ke_transfer_iso.freq_r*2*np.pi)
+        ke_transfer_iso['wavenumber_km'] = 1e3 * (ke_transfer_iso.freq_r*2*np.pi)
+        return(ke_transfer_iso.real * ke_transfer_iso.wavenumber)
+
+    @staticmethod
     def _get_dynmodes(Nsq, e3t, e3w, nmodes=2):
         """
         Calculate the 1st nmodes ocean dynamic vertical modes.
@@ -393,7 +430,7 @@ class Diagnostics:
 
         return(ce)
 
-    def get_vmodes(self, nmodes=2): #TODO: Not adapted for z-coords yet
+    def get_vmodes(self, toce, soce,  nmodes=2, isel={'t':-1}): #TODO: Not adapted for z-coords yet
         """ compute vertical modes
         Wrapper for calling `compute_vmodes` with DataArrays through apply_ufunc. 
         z levels must be in descending order (first element is at surface, last element is at bottom) with algebraic depth (i.e. negative)
@@ -410,16 +447,16 @@ class Diagnostics:
         !! (currently only eigenvalues)
         _________
         """
-        data_T  = self.experiment.data['T_3D']
-        data_W  = self.experiment.data['W_3D']
-        Nsq     = (self.get_N_squared())
+        Nsq     = (self.get_N_squared(toce=toce, soce=soce))
+        mask    = self.experiment.mask
+        e3t     = mask.e3t_0
+        e3w     = mask.e3w_0
         
         if Nsq is not None:
-            mask = self.experiment.mask
             res = xr.apply_ufunc(self._get_dynmodes, 
-                             Nsq.isel(x_c=slice(1,-1), y_c=slice(1,-1), t_y=-1).chunk({'z_f':-1}),
-                             data_T.e3t.where(self.mask.tmask==1.0).isel(x_c=slice(1,-1), y_c=slice(1,-1), t_y=-1).chunk({'z_c':-1}),
-                             data_W.e3w.isel(x_c=slice(1,-1), y_c=slice(1,-1), t_y=-1).chunk({'z_f':-1}),
+                             Nsq.isel(x_c=slice(1,-1), y_c=slice(1,-1), **isel).chunk({'z_f':-1}),
+                             e3t.where(mask.tmask==1.0).isel(x_c=slice(1,-1), y_c=slice(1,-1)).chunk({'z_c':-1}),
+                             e3w.isel(x_c=slice(1,-1), y_c=slice(1,-1)).chunk({'z_f':-1}),
                              input_core_dims=[['z_f'],['z_c'],['z_f']],
                              dask='parallelized', vectorize=True,
                              output_dtypes=[Nsq.dtype],
