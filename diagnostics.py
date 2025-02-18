@@ -468,64 +468,66 @@ class Diagnostics:
             print("W_3D or T_3D data not available.")
             return(None)
     
-    def get_Zanna_Bolton(self, gamma=1.0):
+    def get_KEB(self, c_diss=0.8, Kloewer=True):
+        """
+        Implementation of the kinetic energy backscatter parameterization (KEB).
+        Follows Perezhogin (2020), who followed Juricke (2019).
+        """
+        if Kloewer:
+            dudx    = self.grid.diff(u * mask.umask / e2u, 'X') * e2t / e1t
+            dvdy    = self.grid.diff(v * mask.vmask / e1v, 'Y') * e1t / e2t
+
+            dudy    = self.grid.diff(u / e1u, 'Y') * e1f / e2f * mask.fmask
+            dvdx    = self.grid.diff(v / e2v, 'X') * e1f / e1f * mask.fmask
+
+    
+    
+    def get_Zanna_Bolton(self, u, v, gamma=1.0):
         """
         Implementation of the Zanna & Bolton (2020) subgrid closure discovered by a machine learning algorithm.
         The discretization of its operators follows Pavel Perezhogin.
         """
-        data_U = self.experiment.data['U_3D']
-        data_V = self.experiment.data['V_3D']
-        data_T = self.experiment.data['T_3D']
-        
-        if data_U is not None and data_V is not None and data_T is not None:
-            mask   = self.experiment.mask
-            domain = self.experiment.domain
-            grid   = self.experiment.grid
+        mask   = self.experiment.mask
+        domain = self.experiment.domain
+        grid   = self.experiment.grid
 
-            dudx        = grid.diff(data_U.uoce * mask.umask / domain.e2u, 'X') * domain.e2t / domain.e1t
-            dvdy        = grid.diff(data_V.voce * mask.vmask / domain.e1v, 'Y') * domain.e1t / domain.e2t
+        e3t    = self.domain.e3t_0
+        e3f    = self.domain.e3f_0
+        e3u    = self.domain.e3u_0
+        e3v    = self.domain.e3v_0
 
-            dudy        = grid.diff(data_U.uoce / domain.e1u, 'Y') * domain.e1f / domain.e2f * mask.fmask
-            dvdx        = grid.diff(data_V.voce / domain.e2v, 'X') * domain.e1f / domain.e1f * mask.fmask
-
-            sh_xx       = dudx - dvdy       # Stretching deformation \tilde{D} on T-point
-            sh_xy       = dvdx + dudy       # Shearing deformation D on F-point 
-            vort_xy     = dvdx - dudy       # Relative vorticity \Zeta on F-point
-
-            kappa_t     = domain.e2t * domain.e1t * mask.tmask * gamma
-            kappa_f     = domain.e2f * domain.e1f * mask.fmask * gamma
-
-            # Interpolating defomation and vorticity on opposite grid-points
-            # TODO: different discretizations of the interpolation as proposed by Pavel
-            vort_xy_t   = grid.interp(vort_xy,['X', 'Y']) * mask.tmask
-            sh_xy_t     = grid.interp(sh_xy,['X', 'Y']) * mask.tmask
-            sh_xx_f     = grid.interp(sh_xx,['X', 'Y']) * mask.fmask
-
-            # Hydrostatic component of Txx/Tyy
-            sum_sq      = 0.5 * (vort_xy_t**2 + sh_xy_t**2 + sh_xx**2)
-            # Deviatoric component of Txx/Tyy        
-            vort_sh     = vort_xy_t * sh_xy_t
-
-            Txx         = - kappa_t * (- vort_sh + sum_sq)
-            Tyy         = - kappa_t * (+ vort_sh + sum_sq)
-            Txy         = - kappa_f * (vort_xy * sh_xx_f)
-
-            ZB2020u     = (grid.diff(Txx * data_T.e3t * domain.e2t**2, 'X') / domain.e2u     \
-                    + grid.diff(Txy * domain.e3f * domain.e1f**2, 'Y') / domain.e1u)         \
-                    / (domain.e1u * domain.e2u) / (data_U.e3u + 1e-70)
-
-            ZB2020v     = (grid.diff(Txy * data_T.e3f * domain.e2f**2, 'X') / domain.e2v      \
-                    + self.grid.diff(Tyy * data_T.e3t * domain.e1t**2, 'Y') / domain.e1v)     \
-                    / (domain.e1v * domain.e2v) / (data_V.e3v+1e-70)
-
-            return {
-                'ZB2020u': ZB2020u, 'ZB2020v': ZB2020v, 
-                'Txx': Txx, 'Tyy': Tyy, 'Txy': Txy, 
-                'sh_xx': sh_xx, 'sh_xy': sh_xy, 'vort_xy': vort_xy,
-            }
-        else:
-            print("T_3D, U_3D or V_3D data not available.")
-            return(None)
+        dudx        = grid.diff(u * mask.umask / domain.e2u, 'X') * domain.e2t / domain.e1t
+        dvdy        = grid.diff(v * mask.vmask / domain.e1v, 'Y') * domain.e1t / domain.e2t
+        dudy        = grid.diff(u / domain.e1u, 'Y') * domain.e1f / domain.e2f * mask.fmask
+        dvdx        = grid.diff(v / domain.e2v, 'X') * domain.e1f / domain.e1f * mask.fmask
+        sh_xx       = dudx - dvdy       # Stretching deformation \tilde{D} on T-point
+        sh_xy       = dvdx + dudy       # Shearing deformation D on F-point 
+        vort_xy     = dvdx - dudy       # Relative vorticity \Zeta on F-point
+        kappa_t     = domain.e2t * domain.e1t * mask.tmask * gamma
+        kappa_f     = domain.e2f * domain.e1f * mask.fmask * gamma
+        # Interpolating defomation and vorticity on opposite grid-points
+        # TODO: different discretizations of the interpolation as proposed by Pavel
+        vort_xy_t   = grid.interp(vort_xy,['X', 'Y']) * mask.tmask
+        sh_xy_t     = grid.interp(sh_xy,['X', 'Y']) * mask.tmask
+        sh_xx_f     = grid.interp(sh_xx,['X', 'Y']) * mask.fmask
+        # Hydrostatic component of Txx/Tyy
+        sum_sq      = 0.5 * (vort_xy_t**2 + sh_xy_t**2 + sh_xx**2)
+        # Deviatoric component of Txx/Tyy        
+        vort_sh     = vort_xy_t * sh_xy_t
+        Txx         = - kappa_t * (- vort_sh + sum_sq)
+        Tyy         = - kappa_t * (+ vort_sh + sum_sq)
+        Txy         = - kappa_f * (vort_xy * sh_xx_f)
+        ZB2020u     = (grid.diff(Txx * e3t * domain.e2t**2, 'X') / domain.e2u     \
+                + grid.diff(Txy * domain.e3f * domain.e1f**2, 'Y') / domain.e1u)         \
+                / (domain.e1u * domain.e2u) / (e3u + 1e-70)
+        ZB2020v     = (grid.diff(Txy * e3f * domain.e2f**2, 'X') / domain.e2v      \
+                + self.grid.diff(Tyy * e3t * domain.e1t**2, 'Y') / domain.e1v)     \
+                / (domain.e1v * domain.e2v) / (e3v+1e-70)
+        return {
+            'ZB2020u': ZB2020u, 'ZB2020v': ZB2020v, 
+            'Txx': Txx, 'Tyy': Tyy, 'Txy': Txy, 
+            'sh_xx': sh_xx, 'sh_xy': sh_xy, 'vort_xy': vort_xy,
+        }
     
     def get_subgrid_forcing(self, u, v, other, factor=4, FGR=None):
         '''
@@ -782,6 +784,116 @@ class Diagnostics:
         adv_v = adv_v.transpose(*dims_v)
         return(adv_u, adv_v)
     
+    @staticmethod
+    def get_smagorinsky(u, v, grid, domain, mask, c_smag=3.5, dt=720):
+        """
+        Compute the viscosity coefficient with the smagorinsky scheme.
+        Boundary conditions as by pavel.
+        """
+        # compute grid-factors and constants
+        e1t, e2t = domain.e1t, domain.e2t
+        e1f, e2f = domain.e1f, domain.e2f
+        e1u, e2u = domain.e1u, domain.e2u
+        e1v, e2v = domain.e1v, domain.e2v
 
+        L_sqt_t = ( 2 * e1t * e2t / (e1t + e2t))**2
+        L_sqt_f = ( 2 * e1f * e2f / (e1f + e2f))**2
 
+        c       = (c_smag / np.pi)**2
 
+        dudx    = grid.diff(u * mask.umask / e2u, 'X') * e2t / e1t
+        dvdy    = grid.diff(v * mask.vmask / e1v, 'Y') * e1t / e2t
+
+        dudy    = grid.diff(u / e1u, 'Y') * e1f / e2f * mask.fmask
+        dvdx    = grid.diff(v / e2v, 'X') * e1f / e1f * mask.fmask
+
+        # Squared shearing and stretching deformation on T-/F-point
+        sh_xx_t = (dudx - dvdy)**2                              # Stretching deformation T-point
+        sh_xy_f = (dvdx + dudy)**2                              # Shearing deformation F-point
+        sh_xx_f = grid.interp(sh_xx_t,['X', 'Y']) * mask.fmask  # Stretching deformation F-point
+        sh_xy_t = grid.interp(sh_xy_f,['X', 'Y']) * mask.tmask  # Shearing deformation T-point
+
+        # viscosity coefficients
+        ahm_t    = c * L_sqt_t * np.sqrt(sh_xx_t + sh_xy_t)
+        ahm_f    = c * L_sqt_f * np.sqrt(sh_xx_f + sh_xy_f)
+
+        # upper and lower bounds
+        upper_t = np.sqrt((grid.interp(u, 'X')**2 + grid.interp(v, 'Y')**2) * L_sqt_t) / 12
+        upper_f = np.sqrt((grid.interp(u, 'Y')**2 + grid.interp(v, 'X')**2) * L_sqt_f) / 12
+
+        lower_t = L_sqt_t / (8 * dt)
+        lower_f = L_sqt_f / (8 * dt)
+
+        ahm_t_bound = np.min(np.max(ahm_t, upper_t), lower_t)
+        ahm_f_bound = np.min(np.max(ahm_f, upper_f), lower_f)
+
+        smagorinsky = xr.merge(
+            [
+            ahm_t_bound.rename('ahm_t'),
+            ahm_f_bound.rename('ahm_f'),
+            ]
+        )
+        return(smagorinsky)
+    
+    @classmethod
+    def get_laplacian(cls, u, v, grid, domain, mask):
+        """
+        Compute laplacian operator as discretized in NEMO.
+        Necessary for KEB parameterization.
+        """
+        # for now time-independant (small error compared to NEMO)
+        e1t, e2t, e3t = domain.e1t, domain.e2t, domain.e3t_0
+        e1f, e2f, e3f = domain.e1f, domain.e2f, domain.e3f_0
+        e1u, e2u, e3u = domain.e1u, domain.e2u, domain.e3u_0
+        e1v, e2v, e3v = domain.e1v, domain.e2v, domain.e3v_0
+
+        smago   = cls.get_smagorinsky(u, v, grid, domain, mask)
+
+        dudx    = grid.diff(u * e2u * e3u, 'X') * e1t / e2t / e3t
+        dvdy    = grid.diff(v * e1v * e3v, 'Y') * e1t / e2t / e3t
+
+        dudy    = grid.diff(u * e1u, 'Y') / e1f / e2f
+        dvdx    = grid.diff(v * e2v, 'X') / e1f / e1f
+
+        curl    = smago.ahm_f * (dvdx - dudy)
+        div     = smago.ahm_t * (dudx + dvdy)
+
+        lap_u   = mask.umask * (- grid.diff(curl * e3f, 'Y') / e2u / e3u + grid.diff(div, 'X') / e1u)
+        lap_v   = mask.vmask * (  grid.diff(curl * e3f, 'X') / e1v / e3v + grid.diff(div, 'Y') / e2v)
+        return(lap_u, lap_v)
+    
+    @classmethod
+    def get_E_diss(cls, u, v, grid, domain, mask):
+        """
+        Compute dissipated kinetic energy from the fiffusion scheme.
+        """
+        lap_u, lap_v = cls.get_laplacian(u, v, grid, domain, mask)
+        E_diss_u = - mask.masku * lap_u**2 * domain.e1u * domain.e2u * domain.e3u_0
+        E_diss_v = - mask.maskv * lap_v**2 * domain.e1v * domain.e2v * domain.e3v_0
+        # note that in NEMO 4.2.1 sqrt(ahm) is absorbed in the laplacian and applied twice for bilaplacian
+        # since it appears squared this is already reflected here, but subject to gradient.
+
+        E_diss = (
+            grid.interp(E_diss_u, 'X') + grid.interp(E_diss_v, 'Y')
+        ) / domain.e1t / domain.e2t / domain.e3t_0 
+        return(E_diss)
+    
+    @staticmethod
+    def apply_kloewer(c_diss, u, v, grid, domain, mask):
+        """
+        Apply Kloewer (2018) to modify cdiss.
+        """
+        dudx    = grid.diff(u * mask.umask / domain.e2u, 'X') * domain.e2t / domain.e1t
+        dvdy    = grid.diff(v * mask.vmask / domain.e1v, 'Y') * domain.e1t / domain.e2t
+
+        dudy    = grid.diff(u / domain.e1u, 'Y') * domain.e1f / domain.e2f * mask.fmask
+        dvdx    = grid.diff(v / domain.e2v, 'X') * domain.e1f / domain.e1f * mask.fmask
+
+        # Squared shearing and stretching deformation on T-/F-point
+        sh_xx_t = (dudx - dvdy)**2                              # Stretching deformation T-point
+        sh_xy_f = (dvdx + dudy)**2                              # Shearing deformation F-point
+
+        D_t = np.sqrt(sh_xx_t + grid.interp(sh_xy_f,['X', 'Y'])) * mask.tmask
+        R_local = D_t / domain.ff_t
+        c_diss_local = c_diss / (R_local + c_diss)
+        return(c_diss_local)
