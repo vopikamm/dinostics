@@ -57,9 +57,15 @@ class NemoExperiment:
             domain = xn.open_domain_cfg(
                 files=[self.path + self.restarts[0] + '/domain_cfg_out.nc']
             ).chunk(chunks)
-        for var in list(domain.keys()):
-            if (domain[var].dtype == 'float64'):
-                domain[var] = domain[var].astype('float32')
+        # for var in list(domain.keys()):
+        #     if (domain[var].dtype == 'float64'):
+        #         domain[var] = domain[var].astype('float32')
+        #     if (domain[var].dtype == 'int8'):
+        #         domain[var] = domain[var].astype('float32')
+        # for coord in list(domain.coords):
+        #     if (domain[coord].dtype == 'float64'):
+        #         domain = domain.assign_coords({coord: domain[coord].astype('float32')})
+                
         return(domain)
 
     def open_mask(self, chunks='auto'):
@@ -67,9 +73,15 @@ class NemoExperiment:
         mask = xn.open_domain_cfg(
             files=[self.path + self.restarts[0] + '/mesh_mask.nc']
         ).chunk(chunks)
-        for var in list(mask.keys()):
-            if (mask[var].dtype == 'float64'):
-                mask[var] = mask[var].astype('float32')
+        # for var in list(mask.keys()):
+        #     if (mask[var].dtype == 'float64'):
+        #         mask[var] = mask[var].astype('float32')
+        #     if (mask[var].dtype == 'int8'):
+        #         mask[var] = mask[var].astype('float32')
+            
+        # for coord in list(mask.coords):
+        #     if (mask[coord].dtype == 'float64'):
+        #         mask = mask.assign_coords({coord: mask[coord].astype('float32')})
         return(mask)
 
     def open_data(self, file_name):

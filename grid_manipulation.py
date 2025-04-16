@@ -247,6 +247,25 @@ class GridManipulation:
         var_filtered = _filter_simple_fixed_factor.apply(var, dims=dims)
         #rename dimensions to original and return
         return(var_filtered)
+
+    def filter_shapiro(self, var: xr.DataArray, mask: xr.DataArray) -> xr.DataArray:
+        """
+        Applies a rolling window Shapiro filter. Removes waves at grid-scale.
+        """
+        weights = xr.DataArray(
+            np.array([[1, 2, 1],
+                      [2, 4, 2],
+                      [1, 2, 1]]) / 16.0,
+            dims=['window_x', 'window_y']
+        )
+        dim_x = mask.dims[-1]
+        dim_y = mask.dims[-2]
+        # Apply rolling window with weighted mean
+        filtered = (var.rolling(dim={dim_x: 3, dim_y: 3}, center=True)
+                          .construct({dim_x:'window_x', dim_y:'window_y'})
+                          .dot(weights))
+    
+        return((filtered * mask).fillna(var))  # Apply mask and fill missing values
     
     @staticmethod
     def discard_land(x, percentile=1):

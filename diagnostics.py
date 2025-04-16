@@ -1,6 +1,7 @@
 # Module containing the DINO experiment class collecting all diagnostics.
 import xarray       as xr
 import xgcm         as xg
+import xnemogcm     as xn
 import numpy        as np
 import scipy.sparse as sparse
 import scipy.sparse.linalg as la
@@ -482,19 +483,19 @@ class Diagnostics:
 
     
     
-    def get_Zanna_Bolton(self, u, v, gamma=1.0):
+    def get_Zanna_Bolton(self, u, v, gamma=1.0, n_filter=None, isel={}):
         """
         Implementation of the Zanna & Bolton (2020) subgrid closure discovered by a machine learning algorithm.
         The discretization of its operators follows Pavel Perezhogin.
         """
-        mask   = self.experiment.mask
-        domain = self.experiment.domain
-        grid   = self.experiment.grid
+        mask   = self.experiment.mask.isel(**isel)
+        domain = self.experiment.domain.isel(**isel)
+        grid   = xg.Grid(domain, metrics=xn.get_metrics(domain), periodic=False)
 
-        e3t    = self.domain.e3t_0
-        e3f    = self.domain.e3f_0
-        e3u    = self.domain.e3u_0
-        e3v    = self.domain.e3v_0
+        e3t    = domain.e3t_0
+        e3f    = domain.e3f_0
+        e3u    = domain.e3u_0
+        e3v    = domain.e3v_0
 
         dudx        = grid.diff(u * mask.umask / domain.e2u, 'X') * domain.e2t / domain.e1t
         dvdy        = grid.diff(v * mask.vmask / domain.e1v, 'Y') * domain.e1t / domain.e2t
@@ -514,14 +515,24 @@ class Diagnostics:
         sum_sq      = 0.5 * (vort_xy_t**2 + sh_xy_t**2 + sh_xx**2)
         # Deviatoric component of Txx/Tyy        
         vort_sh     = vort_xy_t * sh_xy_t
+        
         Txx         = - kappa_t * (- vort_sh + sum_sq)
         Tyy         = - kappa_t * (+ vort_sh + sum_sq)
         Txy         = - kappa_f * (vort_xy * sh_xx_f)
+
+        if n_filter is not None:
+            for i in range(0, n_filter):
+                Txx = self.experiment.grid_manipulation.filter_shapiro(Txx, mask.tmask)
+                Tyy = self.experiment.grid_manipulation.filter_shapiro(Tyy, mask.tmask)
+                Txy = self.experiment.grid_manipulation.filter_shapiro(Txy, mask.fmask)
+        else:
+            pass
+        
         ZB2020u     = (grid.diff(Txx * e3t * domain.e2t**2, 'X') / domain.e2u     \
-                + grid.diff(Txy * domain.e3f * domain.e1f**2, 'Y') / domain.e1u)         \
+                + grid.diff(Txy * e3f * domain.e1f**2, 'Y') / domain.e1u)         \
                 / (domain.e1u * domain.e2u) / (e3u + 1e-70)
         ZB2020v     = (grid.diff(Txy * e3f * domain.e2f**2, 'X') / domain.e2v      \
-                + self.grid.diff(Tyy * e3t * domain.e1t**2, 'Y') / domain.e1v)     \
+                + grid.diff(Tyy * e3t * domain.e1t**2, 'Y') / domain.e1v)     \
                 / (domain.e1v * domain.e2v) / (e3v+1e-70)
         return {
             'ZB2020u': ZB2020u, 'ZB2020v': ZB2020v, 
@@ -529,7 +540,7 @@ class Diagnostics:
             'sh_xx': sh_xx, 'sh_xy': sh_xy, 'vort_xy': vort_xy,
         }
     
-    def get_subgrid_forcing(self, u, v, other, factor=4, FGR=None):
+    def get_subgrid_advection(self, u, v, other, factor=4, FGR=None):
         '''
         Compute subgrid forcing:
             SGSx = filter(advection) - advection(coarse_state).
@@ -623,6 +634,111 @@ class Diagnostics:
         # Compute subgrid forcing
         SGS_u = adv_u_coarse - coarse_adv_u
         SGS_v = adv_v_coarse - coarse_adv_v
+        #TODO remote unneccessary dimensions and 
+        return SGS_u, u_coarse, SGS_v, v_coarse
+
+    def get_subgrid_smagorinsky(self, u, v, other, factor=4, FGR=None, c_smag=3.5):
+        '''
+        Compute subgrid forcing:
+            SGSx = filter(biharmonic smnagorinsky) - biharmonic smnagorinsky(coarse_state).
+        '''
+        # Advection in high resolution model
+        dt_self  = self.experiment.namelist['namdom']['rn_Dt']
+        dt_other = other.namelist['namdom']['rn_Dt']
+        
+        hr_blp_u, hr_blp_v = self.get_biharmonic_smagorinsky(
+            u=u,
+            v=v,
+            grid=self.experiment.grid,
+            domain=self.experiment.domain,
+            mask=self.experiment.mask,
+            c_smag=c_smag,
+            dt=dt_self
+        )
+        print('Computed high-resolution biharmonic smagorinsky')
+        # Filter if FGR provided
+        if FGR is not None:
+            # filter scale w.r.t fine grid
+            _filter_scale=FGR * factor
+            print(_filter_scale)
+            #filter velocities:
+            u_filter = self.experiment.grid_manipulation.filter_simple_fixed_factor(
+                #self,
+                var=u,
+                mask=self.experiment.mask.umask,
+                filter_scale=_filter_scale
+            )
+            v_filter = self.experiment.grid_manipulation.filter_simple_fixed_factor(
+                #self,
+                var=v,
+                mask=self.experiment.mask.vmask,
+                filter_scale=_filter_scale
+            )
+            # filter advection
+            blp_u_filter = self.experiment.grid_manipulation.filter_simple_fixed_factor(
+                #self,
+                var=hr_blp_u,
+                mask=self.experiment.mask.umask,
+                filter_scale=_filter_scale
+            )
+            blp_v_filter = self.experiment.grid_manipulation.filter_simple_fixed_factor(
+                #self,
+                var=hr_blp_v,
+                mask=self.experiment.mask.vmask,
+                filter_scale=_filter_scale
+            )
+        else:
+            u_filter = u
+            v_filter = v
+            blp_u_filter = hr_blp_u
+            blp_v_filter = hr_blp_v
+
+        # Interpolate on T-point for coarse-graining
+        u_filter_T = self.experiment.grid.interp(u_filter, 'X')
+        v_filter_T = self.experiment.grid.interp(v_filter, 'Y')
+        blp_u_filter_T = self.experiment.grid.interp(blp_u_filter, 'X')
+        blp_v_filter_T = self.experiment.grid.interp(blp_v_filter, 'Y')
+
+        # Coarse-graining
+        u_coarse_grain = self.experiment.grid_manipulation.coarsen_weighted(
+            var     = u_filter_T,
+            factor  = factor
+        )
+        v_coarse_grain = self.experiment.grid_manipulation.coarsen_weighted(
+            var     = v_filter_T,
+            factor  = factor
+        )
+        blp_u_coarse_grain = self.experiment.grid_manipulation.coarsen_weighted(
+            var     = blp_u_filter_T,
+            factor  = factor
+        )
+        blp_v_coarse_grain = self.experiment.grid_manipulation.coarsen_weighted(
+            var     = blp_v_filter_T,
+            factor  = factor
+        )
+        #velocities on coarse grid
+        u_coarse, v_coarse = self.velocities_on_coarse_grid(u_coarse_grain, v_coarse_grain, other)
+        #advection on coarse grid
+        blp_u_coarse, blp_v_coarse = self.velocities_on_coarse_grid(blp_u_coarse_grain, blp_v_coarse_grain, other)
+
+        # Interpolate back to U/V-point for advection!
+        u_coarse = other.grid.interp(u_coarse, 'X')
+        v_coarse = other.grid.interp(v_coarse, 'Y')
+        blp_u_coarse = other.grid.interp(blp_u_coarse, 'X')
+        blp_v_coarse = other.grid.interp(blp_v_coarse, 'Y')
+        # Compute advection on a coarse grid
+        coarse_blp_u, coarse_blp_v = self.get_biharmonic_smagorinsky(
+            u=u_coarse,
+            v=v_coarse,
+            grid=other.grid,          
+            domain=other.domain,      
+            mask=other.mask,
+            c_smag=c_smag,
+            dt=dt_other
+        )
+        # Compute subgrid forcing
+        SGS_u = blp_u_coarse - coarse_blp_u
+        SGS_v = blp_v_coarse - coarse_blp_v
         #TODO remote unneccessary dimensions and 
         return SGS_u, u_coarse, SGS_v, v_coarse
 
@@ -799,13 +915,17 @@ class Diagnostics:
         L_sqt_t = ( 2 * e1t * e2t / (e1t + e2t))**2
         L_sqt_f = ( 2 * e1f * e2f / (e1f + e2f))**2
 
+        # for broadcasting (not nice fix)
+        #L_sqt_t = L_sqt_t.expand_dims(dim=('t', 'z_c'))
+        #L_sqt_f = L_sqt_f.expand_dims(dim=('t', 'z_c'))
+
         c       = (c_smag / np.pi)**2
 
         dudx    = grid.diff(u * mask.umask / e2u, 'X') * e2t / e1t
         dvdy    = grid.diff(v * mask.vmask / e1v, 'Y') * e1t / e2t
 
         dudy    = grid.diff(u / e1u, 'Y') * e1f / e2f * mask.fmask
-        dvdx    = grid.diff(v / e2v, 'X') * e1f / e1f * mask.fmask
+        dvdx    = grid.diff(v / e2v, 'X') * e2f / e1f * mask.fmask
 
         # Squared shearing and stretching deformation on T-/F-point
         sh_xx_t = (dudx - dvdy)**2                              # Stretching deformation T-point
@@ -813,30 +933,66 @@ class Diagnostics:
         sh_xx_f = grid.interp(sh_xx_t,['X', 'Y']) * mask.fmask  # Stretching deformation F-point
         sh_xy_t = grid.interp(sh_xy_f,['X', 'Y']) * mask.tmask  # Shearing deformation T-point
 
+        # print("Chunks of sh_xx_t:", sh_xx_t.chunks)
+        # print("Chunks of sh_xy_t:", sh_xy_t.chunks)
+        # print("Chunks of sh_xx_f:", sh_xx_f.chunks)
+        # print("Chunks of sh_xy_f:", sh_xy_f.chunks)
+
+        # unfortunately needed, since xarray does weird things sometimes
+        L_sqt_t, sh_xx_t = xr.align(L_sqt_t, sh_xx_t, join="right")
+        L_sqt_f, sh_xx_f = xr.align(L_sqt_f, sh_xx_f, join="right")
+        # print("Chunks of L_sqt_t:", L_sqt_t.chunks)
+        # print("Chunks of L_sqt_f:", L_sqt_f.chunks)
+        
         # viscosity coefficients
-        ahm_t    = c * L_sqt_t * np.sqrt(sh_xx_t + sh_xy_t)
-        ahm_f    = c * L_sqt_f * np.sqrt(sh_xx_f + sh_xy_f)
+        ahm_t = c * L_sqt_t * xr.apply_ufunc(np.sqrt, sh_xx_t + sh_xy_t, dask="parallelized")
+        ahm_f = c * L_sqt_f * xr.apply_ufunc(np.sqrt, sh_xx_f + sh_xy_f, dask="parallelized")
+        # print("Chunks of ahm_t:", ahm_t.chunks)
+        # print("Chunks of ahm_f:", ahm_f.chunks)
 
         # upper and lower bounds
-        upper_t = np.sqrt((grid.interp(u, 'X')**2 + grid.interp(v, 'Y')**2) * L_sqt_t) / 12
-        upper_f = np.sqrt((grid.interp(u, 'Y')**2 + grid.interp(v, 'X')**2) * L_sqt_f) / 12
+        lower_t = (4 / 3) * xr.apply_ufunc(np.sqrt, (grid.interp(u, 'X')**2 + grid.interp(v, 'Y')**2) * L_sqt_t, dask="parallelized") / 12
+        lower_f = (4 / 3) * xr.apply_ufunc(np.sqrt, (grid.interp(u, 'Y')**2 + grid.interp(v, 'X')**2) * L_sqt_f, dask="parallelized") / 12
 
-        lower_t = L_sqt_t / (8 * dt)
-        lower_f = L_sqt_f / (8 * dt)
+        upper_t = L_sqt_t / (8 * dt)
+        upper_f = L_sqt_f / (8 * dt)
+        # print("Chunks of lower_t:", lower_t.chunks)
+        # print("Chunks of upper_t:", upper_t.chunks)
+        # print("Chunks of lower_f:", lower_f.chunks)
+        # print("Chunks of upper_f:", upper_f.chunks)
 
-        ahm_t_bound = np.min(np.max(ahm_t, upper_t), lower_t)
-        ahm_f_bound = np.min(np.max(ahm_f, upper_f), lower_f)
-
-        smagorinsky = xr.merge(
-            [
-            ahm_t_bound.rename('ahm_t'),
-            ahm_f_bound.rename('ahm_f'),
-            ]
+        # for biharmonic smagorinsky
+        #ahm_t_bound = np.clip(ahm_t, lower_t, upper_t)
+        #ahm_f_bound = np.clip(ahm_f, lower_f, upper_f)
+        # ahm_t_bound = xr.ufuncs.sqrt(L_sqt_t * xr.ufuncs.maximum(lower_t, xr.ufuncs.minimum(ahm_t, upper_t)) / 8)
+        # ahm_f_bound = xr.ufuncs.sqrt(L_sqt_f * xr.ufuncs.maximum(lower_f, np.minimum(ahm_f, upper_f)) / 8)
+        ahm_t_bound = xr.apply_ufunc(
+            np.sqrt,
+            L_sqt_t * xr.apply_ufunc(
+                np.maximum,
+                lower_t,
+                xr.apply_ufunc(np.minimum, ahm_t, upper_t, dask="parallelized"), 
+                dask="parallelized"
+            ) / 8,
+            dask="parallelized"
         )
-        return(smagorinsky)
+        
+        ahm_f_bound = xr.apply_ufunc(
+            np.sqrt,
+            L_sqt_f * xr.apply_ufunc(
+                np.maximum,
+                lower_f,
+                xr.apply_ufunc(np.minimum, ahm_f, upper_f, dask="parallelized"), 
+                dask="parallelized"
+            ) / 8,
+            dask="parallelized"
+        )
+
+
+        return(ahm_t_bound, ahm_f_bound)
     
     @classmethod
-    def get_laplacian(cls, u, v, grid, domain, mask):
+    def get_laplacian(cls, u, v, grid, domain, mask, smago_in=None, smago_out=None, c_smag=3.5, dt=720):
         """
         Compute laplacian operator as discretized in NEMO.
         Necessary for KEB parameterization.
@@ -847,20 +1003,71 @@ class Diagnostics:
         e1u, e2u, e3u = domain.e1u, domain.e2u, domain.e3u_0
         e1v, e2v, e3v = domain.e1v, domain.e2v, domain.e3v_0
 
-        smago   = cls.get_smagorinsky(u, v, grid, domain, mask)
+        #print(f'e1t dtype: {e1t.dtype}')
+        #print(f'e1f dtype: {e1f.dtype}')
+        #print(f'e1v dtype: {e1v.dtype}')
+        #print(f'e1u dtype: {e1u.dtype}')
 
-        dudx    = grid.diff(u * e2u * e3u, 'X') * e1t / e2t / e3t
-        dvdy    = grid.diff(v * e1v * e3v, 'Y') * e1t / e2t / e3t
+        #print(f'e2t dtype: {e1t.dtype}')
+        #print(f'e2f dtype: {e1f.dtype}')
+        #print(f'e2v dtype: {e1v.dtype}')
+        #print(f'e2u dtype: {e1u.dtype}')
+
+        #print(f'e3t dtype: {e1t.dtype}')
+        #print(f'e3f dtype: {e1f.dtype}')
+        #print(f'e3v dtype: {e1v.dtype}')
+        #print(f'e3u dtype: {e1u.dtype}')
+
+        if smago_in is None:
+            ahm_t, ahm_f  = cls.get_smagorinsky(u, v, grid, domain, mask, c_smag=c_smag, dt=dt)
+            factor = 1.0
+        else:
+            ahm_t, ahm_f = smago_in 
+            factor = -1.0
+
+        #print(f'smago ahm_t dtype: {smago.ahm_t.dtype}')
+        #print(f'smago ahm_f dtype: {smago.ahm_f.dtype}')
+
+        dudx    = grid.diff(u * e2u * e3u, 'X') / e1t / e2t / e3t
+        dvdy    = grid.diff(v * e1v * e3v, 'Y') / e1t / e2t / e3t
 
         dudy    = grid.diff(u * e1u, 'Y') / e1f / e2f
         dvdx    = grid.diff(v * e2v, 'X') / e1f / e1f
 
-        curl    = smago.ahm_f * (dvdx - dudy)
-        div     = smago.ahm_t * (dudx + dvdy)
+        #print(f'dudx dtype: {dudx.dtype}')
+        #print(f'dudy dtype: {dudy.dtype}')
 
-        lap_u   = mask.umask * (- grid.diff(curl * e3f, 'Y') / e2u / e3u + grid.diff(div, 'X') / e1u)
-        lap_v   = mask.vmask * (  grid.diff(curl * e3f, 'X') / e1v / e3v + grid.diff(div, 'Y') / e2v)
-        return(lap_u, lap_v)
+        #print(f'dvdx dtype: {dvdx.dtype}')
+        #print(f'dvdy dtype: {dvdy.dtype}')
+        
+        curl    = ahm_f * (dvdx - dudy)
+        div     = ahm_t * (dudx + dvdy)
+
+        #print(f'div dtype: {div.dtype}')
+        #print(f'curl dtype: {curl.dtype}')
+
+        lap_u   = factor * mask.umask * (- grid.diff(curl * e3f, 'Y') / e2u / e3u + grid.diff(div, 'X') / e1u)
+        lap_v   = factor * mask.vmask * (  grid.diff(curl * e3f, 'X') / e1v / e3v + grid.diff(div, 'Y') / e2v)
+
+        #print(f'lap_u dtype: {lap_v.dtype}')
+        #print(f'lap_u dtype: {lap_u.dtype}')
+
+        # TODO: Not the best solution...
+        if smago_out:
+           return(lap_u, lap_v, (ahm_t, ahm_f))
+        else:
+           return(lap_u, lap_v)
+
+    @classmethod
+    def get_biharmonic_smagorinsky(cls, u, v, grid, domain, mask, c_smag=3.5, dt=720):
+        """
+        Compute bi-laplacian smago operator as discretized in NEMO.
+        To check energy transfers.
+        """
+        lap_u, lap_v, smago = cls.get_laplacian(u, v, grid, domain, mask, smago_out=True, c_smag=c_smag, dt=dt)
+
+        bilap_u, bilap_v = cls.get_laplacian(lap_u, lap_v, grid, domain, mask, smago_in=smago, c_smag=c_smag, dt=dt)
+        return(bilap_u, bilap_v)
     
     @classmethod
     def get_E_diss(cls, u, v, grid, domain, mask):
@@ -879,7 +1086,7 @@ class Diagnostics:
         return(E_diss)
     
     @staticmethod
-    def apply_kloewer(c_diss, u, v, grid, domain, mask):
+    def apply_kloewer(u, v, grid, domain, mask, R_diss=0.5):
         """
         Apply Kloewer (2018) to modify cdiss.
         """
@@ -894,6 +1101,6 @@ class Diagnostics:
         sh_xy_f = (dvdx + dudy)**2                              # Shearing deformation F-point
 
         D_t = np.sqrt(sh_xx_t + grid.interp(sh_xy_f,['X', 'Y'])) * mask.tmask
-        R_local = D_t / domain.ff_t
-        c_diss_local = c_diss / (R_local + c_diss)
+        R_local = D_t / abs(domain.ff_t) # I think the scaling of c_diss should be the same for both hemispheres!!
+        c_diss_local = R_diss / (R_local + R_diss)
         return(c_diss_local)
