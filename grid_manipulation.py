@@ -88,14 +88,18 @@ class GridManipulation:
         restart_fillxy  = restart_fillx.interpolate_na(dim=('y'), method='nearest', fill_value="extrapolate") 
         return(restart_fillxy)
     
-    def transform_to_density(self, var, isel={'t':-1}, z=2000, levels=36):
+    def transform_to_density(self, var, T=None, S=None, isel={'t':-1}, z=2000, rho_ref=1035.0):
         """Transforming a variable (vertical T-point: z_c) to density coordinates."""
         # Cut out bottom layer of z_c, such that z_f is outer (land anyway)
         ds_top  = self.experiment.domain.isel(z_c=slice(0,-1))
-        var_top = var.isel(z_c=slice(0,-1), **isel)
+        try:
+            var_top = var.isel(z_c=slice(0,-1), **isel)
+        except:
+            var_top = var.isel(z_c=slice(0,-1))
+            print("variable does not have dimension selected in isel. Can be for e3v_0.")
 
         # Compute density if necessary
-        rho = self.experiment.diagnostics.get_rho(z=z).isel(z_c=slice(0,-1), **isel).rename('rho')
+        rho = self.experiment.diagnostics.get_rho(T=T, S=S, z=z, rho_ref=rho_ref).isel(z_c=slice(0,-1), **isel).rename('rho')
         # Mask boundary
         rho = rho.where(self.experiment.mask.tmask == 1.0)
         # define XGCM grid object with outer dimension z_f 
@@ -110,15 +114,16 @@ class GridManipulation:
         )
 
         # Interpolate sigma2 on the cell faces
-        rho_var = grid.interp_like(rho, var_top).chunk({'z_c':35})      #TODO: .chunk({'z_c':-1})? 
+        rho_var = grid.interp_like(rho, var_top).chunk({'z_c':-1})      #TODO: .chunk({'z_c':-1})? 
         rho_out = grid.interp(rho_var, 'Z',  boundary='extend')
 
-        # Target values for density coordinate
-        rho_tar = np.linspace(
-            floor(rho_out.min().values),
-            ceil(rho_out.max().values),
-            levels
-        )
+        #rho_min = float(np.floor(100 * rho_out.min().values) / 100)     # expensive
+        #rho_max = float(np.ceil( 100 * rho_out.max().values) / 100)
+
+        #rho_tar = np.concatenate([np.arange(rho_min,1026.0,0.1), np.arange(1026,1027.2,.03),np.arange(1027.2,rho_max, 0.005)])
+        #rho_tar = np.concatenate([np.arange(rho_min - 0.1, rho_ref, 0.1), np.arange(rho_ref - 0.01, rho_ref + 1.01,.02),np.arange(rho_ref + 1.01, rho_max + 0.02, 0.005)])
+        rho_tar = np.concatenate([np.arange(rho_ref - 40 * 0.1, rho_ref, 0.1), np.arange(rho_ref - 0.02, rho_ref + 1.02,.02),np.arange(rho_ref + 1.01, rho_ref + 1.67  + 0.01, 0.01)])
+        
         # Transform variable to density coordinates:
         var_transformed = grid.transform(
             var_top,
@@ -127,7 +132,78 @@ class GridManipulation:
             method='conservative',
             target_data=rho_out
         )
-        return(var_transformed)
+        return(var_transformed, rho)
+
+    # def transform_to_density_bins(self, var, isel={'t':-1}, z=2000, levels=200):
+    #     """Transforming a variable (vertical T-point: z_c) to density coordinates."""
+    #     # Cut out bottom layer of z_c, such that z_f is outer (land anyway)
+    #     mask = self.experiment.mask
+    #     ds_top  = self.experiment.domain.isel(z_c=slice(0,-1))
+    #     try:
+    #         var_top = var.isel(z_c=slice(0,-1), **isel)
+    #     except:
+    #         var_top = var.isel(z_c=slice(0,-1))
+    #         print("variable does not have dimension selected in isel. Can be for e3v_0.")
+
+    #     # Compute density if necessary
+    #     rho = self.experiment.diagnostics.get_rho(z=z).isel(z_c=slice(0,-1), **isel).rename('rho')
+    #     # Mask boundary
+    #     rho = rho.where(self.experiment.mask.tmask == 1.0)
+    #     # define XGCM grid object with outer dimension z_f 
+    #     grid = xg.Grid(ds_top,
+    #         coords={
+    #             "X": {"right": "x_f", "center":"x_c"},
+    #             "Y": {"right": "y_f", "center":"y_c"},
+    #             "Z": {"center": "z_c", "outer": "z_f"}
+    #         },
+    #         metrics=xn.get_metrics(ds_top),
+    #         periodic=False
+    #     )
+
+    #     # Interpolate sigma2 on the cell faces
+    #     rho_var = grid.interp_like(rho, var_top).chunk({'z_c':-1})      #TODO: .chunk({'z_c':-1})? 
+    #     rho_out = grid.interp(rho_var, 'Z',  boundary='extend')
+
+    #     vol     = (mask.e1t * mask.e2t * mask.e3t_0).isel(z_c=slice(0,-1)).where(mask.tmask == 1.0)
+    #     vol_out = grid.interp(vol, 'Z',  boundary='extend')
+    #     rho_tar = self.get_volume_adaptive_density_bins(rho_out, vol_out, levels=levels)
+        
+    #     # Transform variable to density coordinates:
+    #     var_transformed = grid.transform(
+    #         var_top,
+    #         'Z',
+    #         rho_tar,
+    #         method='conservative',
+    #         target_data=rho_out
+    #     )
+    #     return(var_transformed, rho_out)
+
+    # @staticmethod
+    # def get_volume_adaptive_density_bins(rho, volume, levels=200):
+    #     # Flatten and mask NaNs
+    #     rho_flat = rho.values.flatten()
+    #     vol_flat = volume.values.flatten()
+    #     mask = ~np.isnan(rho_flat) & ~np.isnan(vol_flat)
+    
+    #     rho_clean = rho_flat[mask]
+    #     vol_clean = vol_flat[mask]
+    
+    #     # Sort by increasing density
+    #     sort_idx = np.argsort(rho_clean)
+    #     rho_sorted = rho_clean[sort_idx]
+    #     vol_sorted = vol_clean[sort_idx]
+    
+    #     # Compute cumulative volume
+    #     cum_vol = np.cumsum(vol_sorted)
+    #     total_vol = cum_vol[-1]
+    
+    #     # Target cumulative volume thresholds (equally spaced)
+    #     target_cum_vols = np.linspace(0, total_vol, levels + 1)
+    
+    #     # Find bin edges where cumulative volume crosses each target
+    #     rho_bins = np.interp(target_cum_vols, cum_vol, rho_sorted)
+    
+    #     return rho_bins[:-1]
     
     def filter_vector(self, u, v, FGR=2):
         '''

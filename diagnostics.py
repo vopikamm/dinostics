@@ -6,6 +6,7 @@ import numpy        as np
 import scipy.sparse as sparse
 import scipy.sparse.linalg as la
 import xrft
+import dask
 
 class Diagnostics:
     """ Diagnostics helper class collecting all diagnostic methods for DINO Experiment class. """
@@ -194,7 +195,7 @@ class Diagnostics:
         return(buoyancy_flux)
         
     
-    def get_rho(self, T=None, S=None, z=0.):
+    def get_rho(self, T=None, S=None, z=0., rho_ref=1026.0):
         """
         Compute potential density referenced to the surface according to the EOS. 
         Uses gdepth_0 as depth for simplicity and allows only for S-EOS currently.
@@ -204,7 +205,7 @@ class Diagnostics:
         if T is None:
             try:
                 print("T not provided. Use data[T_3D].toce")
-                T = self.experiment.data['T_3D'].toce
+                T = self.experiment.data['inst_T_3D'].toce_inst
             except:
                 print("T_3D data not available.")
             if T is None:
@@ -214,7 +215,7 @@ class Diagnostics:
         if S is None:
             try:
                 print("S not provided. Use data[T_3D].soce")
-                S = self.experiment.data['T_3D'].soce
+                S = self.experiment.data['inst_T_3D'].soce_inst
             except:
                 print("T_3D data not available.")
             if S is None:
@@ -231,14 +232,14 @@ class Diagnostics:
                 - nml['rn_a0'] * (1. + 0.5 * nml['rn_lambda1'] * ( toce - 10.) + nml['rn_mu1'] * z) * ( toce - 10.) 
                 + nml['rn_b0'] * (1. - 0.5 * nml['rn_lambda2'] * ( soce - 35.) - nml['rn_mu2'] * z) * ( soce - 35.) 
                 - nml['rn_nu'] * ( toce - 10.) * ( soce - 35.)
-            ) + 1026
+            ) + rho_ref
             return(rho)
         else:
             raise Exception('Only S-EOS has been implemented yet.')
         return(rho)
         
         
-    def get_N_squared(self, toce=None, soce=None):
+    def get_N_squared(self, toce=None, soce=None, e3w=None):
         """
         Compute the squared Brunt-Väisälä frequency according to the EOS. 
         Only for S-EOS currently.
@@ -255,7 +256,10 @@ class Diagnostics:
             grid = xg.Grid(domain, metrics=metrics, periodic=False)
 
             # for now no time-dependency...
-            e3w = mask.e3w_0
+            if e3w is None:
+                e3w = msk.e3w_0
+            else:
+                pass
 
             # masking of T,S
             soce = soce.where(mask.tmask == 1.)
@@ -263,8 +267,8 @@ class Diagnostics:
             z    = mask.gdept_0.where(mask.tmask == 1.)
 
             if nml['ln_seos']:
-                alpha   = ( nml['rn_a0'] * (1. + nml['rn_lambda1'] * ( toce - 10.) + nml['rn_mu1'] * z) + nml['rn_nu'] * soce ) / 1026.  
-                beta    = ( nml['rn_b0'] * (1. - nml['rn_lambda2'] * ( soce - 35.) - nml['rn_mu2'] * z) + nml['rn_nu'] * toce ) / 1026.
+                alpha   = ( nml['rn_a0'] * (1. + nml['rn_lambda1'] * ( toce - 10.) + nml['rn_mu1'] * z) + nml['rn_nu'] * ( soce - 35.) ) / 1026.  
+                beta    = ( nml['rn_b0'] * (1. - nml['rn_lambda2'] * ( soce - 35.) - nml['rn_mu2'] * z) + nml['rn_nu'] * ( toce - 10.) ) / 1026.
                 Nsq   = 9.80665 * (
                     - grid.interp(alpha, 'Z', boundary='extend')           # alpha on W
                     * grid.diff(toce, 'Z', boundary='extend')              # dT/dz
@@ -298,19 +302,108 @@ class Diagnostics:
             print("U_3D data not available.")
             return(None)
     
-    def get_MOC(self, var, isel={'t':-1}, z=2000):
+    def get_MOC(self, var, T=None, S=None, isel={'t':-1}, z=2000, rho_ref=1035.0):
         """ Compute the Meridional Overturning Streamfunction of transport variable `var`. """
         # Prepare the meridional transport:
         domain = self.experiment.domain
         if var.name == 'vocetr_eff':
             var = var
+        elif var.name == 'voce_e3v_inst':
+            var = var * domain.e1v
+        elif var.name == 'voce_e3v':
+            var = var * domain.e1v
         else:
             var = (var * domain.e3v_0 * domain.e1v)
-        var_tra = self.experiment.grid_manipulation.transform_to_density(var=var, isel=isel, z=z)
-        moc = var_tra.sum(dim='x_c')[...,::-1].cumsum('rho') / 1e6
-        moc = moc.assign_coords(dict({'y_f': domain.gphif.isel(x_f=0).values}))
+            
+        var_tra, _ = self.experiment.grid_manipulation.transform_to_density(var=var, T=T, S=S, isel=isel, z=z, rho_ref=rho_ref)
+        
+        moc = var_tra.sum(dim='x_c').cumsum('rho') / 1e6
         return(moc)
+
+    def get_MOC_pseudodepth(self, var, e3v, isel={'t': -1}, z=2000, dz=5.0, zmax=4000):
+        """
+        Compute the Meridional Overturning Circulation in pseudo-depth coordinates.
+        """
+        domain = self.experiment.domain
+        mask   = self.experiment.mask
+        area   = (domain.e1v * domain.e2v) * mask.vmask.isel(z_c=0)
+        volume = (domain.e1v * domain.e2v * e3v).isel(**isel) * mask.vmask
+        bathy  = (e3v * mask.vmask).sum('z_c').isel(**isel)
+        
+        if var.name != 'vocetr_eff':
+            var = var * e3v * domain.e1v * mask.vmask
     
+        var_rho, _ = self.experiment.grid_manipulation.transform_to_density(var=var, isel=isel, z=z, levels=200)
+        vol_rho, _ = self.experiment.grid_manipulation.transform_to_density(var=volume, isel=isel, z=z, levels=200)#TODO pass isel properly
+        
+        vol_under_rho = (
+           vol_rho.isel(rho=slice(None, None, -1))
+           .cumsum('rho')
+           .isel(rho=slice(None, None, -1))
+           .sum(dim='x_c')
+        )  # dims: (y_f, rho)
+    
+        z_levels = np.arange(0, zmax + dz, dz)
+        z_da = xr.DataArray(z_levels, dims='z', coords={'z': z_levels})
+        depth_below_z = (bathy - z_da).clip(min=0)
+        vol_geo = (depth_below_z * area).sum(dim='x_c')  # dims: (y_f, z)
+    
+        # Expand dims to allow broadcasting to shape (y_f, rho, z)
+        vol_geo_exp = vol_geo.expand_dims({'rho': vol_under_rho.rho})
+        volu_rho_exp = vol_under_rho.expand_dims({'z': vol_geo.z})
+        
+        # Compute mask of valid z indices (where volume under depth >= volume under isopycnal)
+        mask = vol_geo_exp >= volu_rho_exp
+        
+        # Find deepest z-level (i.e. last True along z)
+        pseudo_depth_idx = mask.isel(z=slice(None, None, -1)).argmax(dim='z')
+        pseudo_depth_idx = len(z_levels) - 1 - pseudo_depth_idx
+        
+        # Handle points where no valid depth is found
+        pseudo_depth_idx = pseudo_depth_idx.where(mask.any(dim='z')).compute()
+        
+        # Use .isel with a dummy z dimension for correct broadcasting
+        pseudo_depth_idx_filled = pseudo_depth_idx.fillna(0).astype(int)
+        pseudo_depth = z_da.isel(z=pseudo_depth_idx_filled)
+        #pseudo_depth = pseudo_depth.where(pseudo_depth_idx.notnull())
+        
+        moc_rho = var_rho.sum(dim='x_c').cumsum('rho') / 1e6  # Sv
+        # moc_pseudo = xr.DataArray(
+        #     moc_rho.values,
+        #     dims=["y_f", "rho"],
+        #     coords={
+        #         "y_f": domain.gphif.isel(x_f=0),
+        #         "pseudo_depth": pseudo_depth,
+        #         "rho_1d": moc_rho.rho
+        #     },
+        #     name="moc_pseudodepth"
+        # )
+    
+        return moc_rho, pseudo_depth
+
+    def get_isopycnal_depth(self, e3t=None, T=None, S=None, isel={'t':-1}, z=2000, rho_ref=1035.0):
+        """
+        Compute the depth of isopycnal levels.
+        """
+        vars = {'e3t_inst':e3t, 'toce_inst':T, 'soce_inst':S}
+        for key, field in vars.items():
+            if field is None:
+                try:
+                    vars[key] = self.experiment.data['inst_T_3D'][key]
+                except:
+                    print(f"No variable {key} in experiment.")
+                    return
+        e3t = vars['e3t_inst']
+        T = vars['toce_inst']
+        S = vars['soce_inst']
+        
+        domain = self.experiment.domain
+        mask   = self.experiment.mask
+        depth_t = (e3t.cumsum('z_c') - 0.5 * e3t) * mask.tmask
+        
+        depth_rho, _ = self.experiment.grid_manipulation.transform_to_density(var=depth_t, T=T, S=S, isel=isel, z=z, rho_ref=rho_ref)#TODO pass isel properly
+        return depth_rho
+
     def get_ACC(self):
         """
         Compute the Antarctic Circumpolar Current.
@@ -347,6 +440,24 @@ class Diagnostics:
         T_on_V = grid.interp(T, 'Y')
         rho_on_V = grid.interp(rho, 'Y')
         mht    = c_p * grid.integrate(rho_on_V * T_on_V * V, ['X', 'Z'])
+        return(mht)
+
+    def get_meridional_heat_transport(exp, T=None, V=None, rho=None, e3v=None):
+        """
+        Compute the meridional heat transport.
+    
+        Defined as c_p * \int \int rho * T * V dx dz.
+        """
+        domain = exp.domain
+        grid   = exp.grid
+    
+        c_p = 3991.86795711963 # From NEMO
+        T_on_V = grid.interp(T, 'Y')
+        rho_on_V = grid.interp(rho, 'Y')
+        
+        integrant = (rho_on_V * T_on_V * V * e3v * exp.mask.vmask).sum('z_c')
+        
+        mht    = c_p * grid.integrate(integrant, 'X')
         return(mht)
 
     def get_ocean_heat_content(self, T=None):
@@ -590,6 +701,7 @@ class Diagnostics:
             adv_u_filter = hr_adv_u
             adv_v_filter = hr_adv_v
 
+
         # Interpolate on T-point for coarse-graining
         u_filter_T = self.experiment.grid.interp(u_filter, 'X')
         v_filter_T = self.experiment.grid.interp(v_filter, 'Y')
@@ -632,8 +744,14 @@ class Diagnostics:
             mask=other.mask           
         )
         # Compute subgrid forcing
+        u_coarse = u_coarse
+        v_coarse = v_coarse
+        
         SGS_u = adv_u_coarse - coarse_adv_u
         SGS_v = adv_v_coarse - coarse_adv_v
+
+        SGS_u = SGS_u
+        SGS_v = SGS_v
         #TODO remote unneccessary dimensions and 
         return SGS_u, u_coarse, SGS_v, v_coarse
 
@@ -818,6 +936,68 @@ class Diagnostics:
             KE  = _KE
         return(KE)
 
+    # @classmethod
+    # def get_horizontal_advection_cgpt(cls, u, v, grid, domain, mask):
+    #     q_ne = cls.get_potential_vorticity(u, v, grid, domain, mask)
+
+    #     q_nw = q_ne.roll(x_f=1)
+    #     q_sw = q_nw.shift(y_f=1, fill_value=0.)
+    #     q_se = q_ne.shift(y_f=1, fill_value=0.)
+
+    #     q_f_to_c = lambda q: q.swap_dims({'x_f': 'x_c', 'y_f': 'y_c'}) * mask.tmask / 12.
+    #     Q_ne, Q_nw, Q_sw, Q_se = map(q_f_to_c, [
+    #         q_se + q_ne + q_nw,
+    #         q_ne + q_nw + q_sw,
+    #         q_nw + q_sw + q_se,
+    #         q_sw + q_se + q_ne
+    #     ])
+
+    #     Q_U_ne = Q_nw.roll(x_c=-1).swap_dims({'x_c': 'x_f'})
+    #     Q_U_nw = Q_ne.swap_dims({'x_c': 'x_f'})
+    #     Q_U_sw = Q_se.swap_dims({'x_c': 'x_f'})
+    #     Q_U_se = Q_sw.roll(x_c=-1).swap_dims({'x_c': 'x_f'})
+
+    #     vel_v = v * domain.e1v * domain.e3v_0
+    #     V_U_ne = vel_v.roll(x_c=-1).swap_dims({'x_c': 'x_f', 'y_f': 'y_c'})
+    #     V_U_nw = vel_v.swap_dims({'x_c': 'x_f', 'y_f': 'y_c'})
+    #     V_U_sw = V_U_nw.shift(y_c=1, fill_value=0.)
+    #     V_U_se = V_U_ne.shift(y_c=1, fill_value=0.)
+
+    #     Q_V_ne = Q_se.shift(y_c=-1, fill_value=0.).swap_dims({'y_c': 'y_f'})
+    #     Q_V_nw = Q_sw.shift(y_c=-1, fill_value=0.).swap_dims({'y_c': 'y_f'})
+    #     Q_V_sw = Q_nw.swap_dims({'y_c': 'y_f'})
+    #     Q_V_se = Q_ne.swap_dims({'y_c': 'y_f'})
+
+    #     vel_u = u * domain.e3u_0 * domain.e2u
+    #     U_V_se = vel_u.swap_dims({'x_f': 'x_c', 'y_c': 'y_f'})
+    #     U_V_sw = vel_u.roll(x_f=1).swap_dims({'x_f': 'x_c', 'y_c': 'y_f'})
+    #     U_V_nw = U_V_sw.shift(y_f=-1, fill_value=0.)
+    #     U_V_ne = U_V_se.shift(y_f=-1, fill_value=0.)
+
+    #     KE = cls.get_kinetic_energy(u, v, grid, mask, hollingsworth=True).persist()
+
+    #     Q_U_ne, Q_U_nw, Q_U_sw, Q_U_se, V_U_ne, V_U_nw, V_U_sw, V_U_se = dask.persist(
+    #         Q_U_ne, Q_U_nw, Q_U_sw, Q_U_se, V_U_ne, V_U_nw, V_U_sw, V_U_se
+    #     )
+
+    #     adv_u = mask.umask * (
+    #         Q_U_ne * V_U_ne + Q_U_nw * V_U_nw + Q_U_sw * V_U_sw + Q_U_se * V_U_se -
+    #         grid.diff(KE, 'X')
+    #     ) / domain.e1u
+
+    #     adv_v = -mask.vmask * (
+    #         Q_V_ne * U_V_ne + Q_V_nw * U_V_nw + Q_V_sw * U_V_sw + Q_V_se * U_V_se -
+    #         grid.diff(KE, 'Y')
+    #     ) / domain.e2v
+
+    #     dims_u = tuple(d for d in ('t', 'z_c', 'y_c', 'x_f') if d in adv_u.dims)
+    #     dims_v = tuple(d for d in ('t', 'z_c', 'y_f', 'x_c') if d in adv_v.dims)
+
+    #     adv_u = adv_u.transpose(*dims_u)
+    #     adv_v = adv_v.transpose(*dims_v)
+
+    #     return adv_u, adv_v
+        
     @classmethod
     def get_horizontal_advection(cls, u, v, grid, domain, mask):
         """
